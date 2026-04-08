@@ -1,0 +1,8 @@
+.cache/
+.vscode/
+.xmake/
+build/
+bin/
+.zed/
+compile_commands.json
+*.spv
