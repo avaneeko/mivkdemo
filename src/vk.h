@@ -31,5 +31,6 @@ typedef struct {
 
 /* Initialize vulkan. */
 VkResult vk_init(vulkan* vk, HWND hwnd, unsigned short width, unsigned short height);
+uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t memory_type_bits, VkMemoryPropertyFlags required_properties);
 
 #endif

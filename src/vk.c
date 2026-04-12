@@ -391,7 +391,7 @@ static VkResult create_image_views(VkDevice device, VkImage* images, uint32_t im
     return VK_SUCCESS;
 }
 
-static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t memory_type_bits, VkMemoryPropertyFlags required_properties)
+uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t memory_type_bits, VkMemoryPropertyFlags required_properties)
 {
     VkPhysicalDeviceMemoryProperties prop;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &prop);
