@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "tri_pipeline.h"
+#include "upload_gpu_data.h"
 #include "window.h"
 #include "vk.h"
 
@@ -59,6 +60,13 @@ int main(int argc, const char** argv)
         printf("Tri pipeline created!\r\n");
     }
 
+    // testing
+    VkBuffer vertex_buffer;
+    VkDeviceMemory vertex_buffer_memory;
+    VkResult res = upload_gpu_data(vk.device, vk.physical_device, vk.command_pools[0], vk.queue, &vertex_buffer, &vertex_buffer_memory);
+    printf("Upload GPU Data result: %i\r\n", res);
+    // end of testing.
+
     frame_t frame;
 
     //__builtin_dump_struct(&vk, printf);
@@ -76,7 +84,7 @@ int main(int argc, const char** argv)
         //printf("vkAcquireNextImageKHR failed: %d\n", res);
         assert(res == VK_SUCCESS);
 
-        const VkCommandBufferBeginInfo info = {
+        VkCommandBufferBeginInfo const info = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .pNext = 0,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -152,6 +160,7 @@ int main(int argc, const char** argv)
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tri_pipeline);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, &(VkDeviceSize){0});
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
         vkCmdEndRendering(cmd);
@@ -200,7 +209,7 @@ int main(int argc, const char** argv)
 
         VkResult submitRes = vkQueueSubmit(vk.queue, 1, &submitInfo, frame.render_fence);
         if (submitRes != VK_SUCCESS) {
-            //printf("vkQueueSubmit failed: %d\n", submitRes);
+            printf("vkQueueSubmit failed: %i\r\n", submitRes);
             assert(0);
         }
 
@@ -216,11 +225,11 @@ int main(int argc, const char** argv)
 
         VkResult presentRes = vkQueuePresentKHR(vk.queue, &present_info);
         if (presentRes != VK_SUCCESS) {
-            //printf("vkQueuePresentKHR failed: %d\n", presentRes);
+            printf("vkQueuePresentKHR failed: %i\n", presentRes);
             assert(0);
         }
 
-        //Sleep(1);
+        Sleep(1);
     }
 
     return 0;

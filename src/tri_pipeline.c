@@ -3,6 +3,10 @@
 #include "stdio.h"
 #include "stdlib.h"
 
+#ifndef ARRAYSIZE
+#define ARRAYSIZE(A) (sizeof(A)/sizeof((A)[0]))
+#endif
+
 // UNDONE: Make sure these are not hardcoded.
 #define TRI_VS_PATH "c:/stuff/mivkdemo/shaders/tri.vs.spv"
 #define TRI_PS_PATH "c:/stuff/mivkdemo/shaders/tri.ps.spv"
@@ -37,8 +41,36 @@ VkResult create_tri_pipeline(VkDevice device, VkFormat color_format, VkFormat de
         },
     };
 
+    VkVertexInputBindingDescription binding ={
+        .binding = 0,
+        .stride = 32,
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+
+    // Why is this not called layout?
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = 0,
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = 16,
+        },
+    };
+
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = ARRAYSIZE(attributes),
+        .pVertexAttributeDescriptions = attributes,
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
