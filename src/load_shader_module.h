@@ -1,5 +1,5 @@
-#ifndef _LOAD_SHADER_MODULE_
-#define _LOAD_SHADER_MODULE_
+#ifndef _LOAD_SHADER_MODULE_H_
+#define _LOAD_SHADER_MODULE_H_
 
 #include "vulkan/vulkan.h"
 

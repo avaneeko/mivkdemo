@@ -42,6 +42,23 @@ VkResult create_device_local_vkbuf(VkDevice device, VkDeviceSize buffer_size, Vk
 }
 
 static
+VkResult create_device_local_vkbuf_usage_bit(VkDevice device, VkDeviceSize buffer_size, VkBufferUsageFlagBits usage, VkBuffer* out_buf)
+{
+    VkBufferCreateInfo const info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = NULL,
+    };
+    VkResult res = vkCreateBuffer(device, &info, NULL, out_buf);
+    return res;
+}
+
+static
 VkResult alloc_staging_buffer_memory(VkDevice device, VkPhysicalDevice physical_device, VkBuffer buffer, VkDeviceSize allocation_size, VkDeviceMemory* out_memory)
 {
     VkMemoryRequirements mem_req;
@@ -103,6 +120,7 @@ VkResult allocate_temporary_cmdbuf(VkDevice device, VkCommandPool pool, VkComman
 
 // We will create a temporary upload fence and command buffer and delete it, but in a more production ready API,
 // it would be better to just create it once and reuse it.
+// UNDONE: Make failure of this function non-fatal.
 VkResult instant_upload(VkDevice device, VkCommandPool cmd_pool, VkQueue queue, VkBuffer host_buf, VkBuffer device_buf, VkDeviceSize buf_size)
 {
     VkFence fence; // Host->Device-local memory upload fence.
@@ -280,4 +298,134 @@ VkResult upload_gpu_data(VkDevice device, VkPhysicalDevice physical, VkCommandPo
     *out_vertex_buffer_memory = device_memory;
 
     return res;
+}
+
+static
+VkResult create_gpu_buffer(
+    VkDevice device,
+    VkPhysicalDevice physical,
+    VkCommandPool cmd_pool,
+    VkQueue queue,
+    VkBufferUsageFlagBits usage,
+    void* data,
+    size_t data_size,
+    VkBuffer* out_buffer,
+    VkDeviceMemory* out_memory)
+{
+    VkDeviceSize size = (VkDeviceSize)data_size;
+
+    // Staging buffer
+    VkBuffer staging;
+    VkResult res = create_staging_vkbuf(device, size, &staging);
+    if (res != VK_SUCCESS)
+    {
+        return res;
+    }
+
+    VkDeviceMemory staging_mem;
+    res = alloc_staging_buffer_memory(device, physical, staging, size, &staging_mem);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        return res;
+    }
+
+    res = vkBindBufferMemory(device, staging, staging_mem, 0);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        vkFreeMemory(device, staging_mem, NULL);
+        return res;
+    }
+
+    void* mapped;
+    res = vkMapMemory(device, staging_mem, 0, size, 0, &mapped);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        vkFreeMemory(device, staging_mem, NULL);
+        return res;
+    }
+
+    memcpy(mapped, data, data_size);
+
+    vkUnmapMemory(device, staging_mem);
+
+
+    // Device-local buffer
+    VkBuffer device_buf;
+    res = create_device_local_vkbuf_usage_bit(device, size, usage, &device_buf);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        vkFreeMemory(device, staging_mem, NULL);
+        return res;
+    }
+    VkDeviceMemory device_mem;
+    res = alloc_device_local_buffer_memory(device, physical, device_buf, size, &device_mem);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        vkDestroyBuffer(device, device_buf, NULL);
+        vkFreeMemory(device, staging_mem, NULL);
+        return res;
+    }
+
+    res = vkBindBufferMemory(device, device_buf, device_mem, 0);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        vkDestroyBuffer(device, device_buf, NULL);
+        vkFreeMemory(device, device_mem, NULL);
+        vkFreeMemory(device, staging_mem, NULL);
+        return res;
+    }
+
+    // Copy and wait
+    res = instant_upload(device, cmd_pool, queue, staging, device_buf, size);
+    if (res != VK_SUCCESS)
+    {
+        vkDestroyBuffer(device, staging, NULL);
+        vkDestroyBuffer(device, device_buf, NULL);
+        vkFreeMemory(device, device_mem, NULL);
+        vkFreeMemory(device, staging_mem, NULL);
+        return res;
+    }
+
+    // Success!
+
+    // Cleanup staging
+    vkDestroyBuffer(device, staging, 0);
+    vkFreeMemory(device, staging_mem, 0);
+
+    *out_buffer = device_buf;
+    *out_memory = device_mem;
+
+    return res;
+}
+
+VkResult create_vertex_buffer(
+    VkDevice device,
+    VkPhysicalDevice physical,
+    VkCommandPool cmd_pool,
+    VkQueue queue,
+    void const* data,
+    size_t data_size,
+    VkBuffer* out_buffer,
+    VkDeviceMemory* out_vertex_buffer_memory)
+{
+    return create_gpu_buffer(device, physical, cmd_pool, queue, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, data, data_size, out_buffer, out_vertex_buffer_memory);
+}
+
+VkResult create_index_buffer(
+    VkDevice device,
+    VkPhysicalDevice physical,
+    VkCommandPool cmd_pool,
+    VkQueue queue,
+    void const* data,
+    size_t data_size,
+    VkBuffer* out_buffer,
+    VkDeviceMemory* out_index_buffer_memory)
+{
+    return create_gpu_buffer(device, physical, cmd_pool, queue, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, data, data_size, out_buffer, out_index_buffer_memory);
 }

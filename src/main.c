@@ -61,9 +61,16 @@ int main(int argc, const char** argv)
     }
 
     // testing
+    float const data[] =
+    {
+         0.0f, -0.5f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 67.0f,
+         0.5f,  0.5f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 67.0f,
+        -0.5f,  0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 67.0f,
+    };
     VkBuffer vertex_buffer;
     VkDeviceMemory vertex_buffer_memory;
-    VkResult res = upload_gpu_data(vk.device, vk.physical_device, vk.command_pools[0], vk.queue, &vertex_buffer, &vertex_buffer_memory);
+    // VkResult res = upload_gpu_data(vk.device, vk.physical_device, vk.command_pools[0], vk.queue, &vertex_buffer, &vertex_buffer_memory);
+    VkResult res = create_vertex_buffer(vk.device, vk.physical_device, vk.command_pools[0], vk.queue, data, sizeof(data), &vertex_buffer, &vertex_buffer_memory);
     printf("Upload GPU Data result: %i\r\n", res);
     // end of testing.
 
