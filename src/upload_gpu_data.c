@@ -307,7 +307,7 @@ VkResult create_gpu_buffer(
     VkCommandPool cmd_pool,
     VkQueue queue,
     VkBufferUsageFlagBits usage,
-    void* data,
+    void const* data,
     size_t data_size,
     VkBuffer* out_buffer,
     VkDeviceMemory* out_memory)
@@ -428,4 +428,135 @@ VkResult create_index_buffer(
     VkDeviceMemory* out_index_buffer_memory)
 {
     return create_gpu_buffer(device, physical, cmd_pool, queue, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, data, data_size, out_buffer, out_index_buffer_memory);
+}
+
+static
+VkDeviceSize calculate_image_size(VkFormat fmt, uint32_t width, uint32_t height)
+{
+    switch (fmt)
+    {
+        case VK_FORMAT_R8G8B8A8_SRGB:
+            return width * height * 4;
+        default:
+        fprintf(stderr, "Fatal error:\r\nRequesting a format unsupported by " __FUNCTION__ "\r\n");
+        exit(1);
+    }
+}
+
+// Creates a basic 2D, mip-less image.
+VkResult create_image(
+    VkDevice device,
+    VkPhysicalDevice physical,
+    VkCommandPool cmd_pool,
+    VkQueue queue,
+    void* pixel_data,
+    uint32_t width,
+    uint32_t height,
+    VkFormat format,
+    VkImage* out_image,
+    VkDeviceMemory* out_memory,
+    VkImageView* out_view
+)
+{
+    VkResult res;
+
+    VkDeviceSize const size = calculate_image_size(format, width, height);
+
+    VkBuffer staging;
+    res = create_staging_vkbuf(device, size, &staging);
+    if (res != VK_SUCCESS)
+    {
+        return res;
+    }
+
+    VkDeviceMemory staging_mem;
+    res = alloc_staging_buffer_memory(device, physical, staging, size, &staging_mem);
+    if (res != VK_SUCCESS) {
+        vkDestroyBuffer(device, staging, NULL);
+        return res;
+    }
+
+    res = vkBindBufferMemory(device, staging, staging_mem, 0);
+    if (res != VK_SUCCESS)
+    {
+        vkFreeMemory(device, staging_mem, NULL);
+        vkDestroyBuffer(device, staging, NULL);
+        return res;
+    }
+
+    {
+        void* ptr;
+        res = vkMapMemory(device, staging_mem, 0, size, 0, &ptr);
+        if (res != VK_SUCCESS)
+        {
+            vkDestroyBuffer(device, staging, NULL);
+            vkFreeMemory(device, staging_mem, NULL);
+            return res;
+        }
+
+        memcpy(ptr, pixel_data, size);
+
+        vkUnmapMemory(device, staging_mem);
+    }
+
+    // Device local image and it's memory.
+    VkImage img; // Final image in device memory.
+    VkDeviceMemory img_mem; // It's memory.
+    {
+        VkImageCreateInfo const info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = NULL,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = {width, height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = NULL,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        res = vkCreateImage(device, &info, NULL, &img);
+        if (res != VK_SUCCESS)
+        {
+            vkDestroyBuffer(device, staging, NULL);
+            vkFreeMemory(device, staging_mem, NULL);
+            return res;
+        }
+
+        {
+            VkMemoryRequirements req;
+            vkGetImageMemoryRequirements(device, img, &req);
+            VkMemoryAllocateInfo const info = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                .pNext = NULL,
+                .allocationSize = req.size,
+                .memoryTypeIndex = find_memory_type(physical, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+            };
+            res = vkAllocateMemory(device, &info, NULL, &img_mem);
+            if (res != VK_SUCCESS)
+            {
+                vkDestroyImage(device, img, NULL);
+                vkDestroyBuffer(device, staging, NULL);
+                vkFreeMemory(device, staging_mem, NULL);
+                return res;
+            }
+        }
+
+        res = vkBindImageMemory(device, img, img_mem, 0);
+        if (res != VK_SUCCESS)
+        {
+            vkDestroyImage(device, img, NULL);
+            vkFreeMemory(device, img_mem, NULL);
+            vkDestroyBuffer(device, staging, NULL);
+            vkFreeMemory(device, staging_mem, NULL);
+            return res;
+        }
+    }
+
+    return res;
 }
