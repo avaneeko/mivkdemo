@@ -1,6 +1,10 @@
 #ifndef WINDOW_H
 #define WINDOW_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <windows.h>
 
@@ -16,5 +20,9 @@ bool window_init(Window* window, const char* window_name, unsigned short width, 
     Returns true if windows has asked the application to exit.
 */
 bool windows_process_msg_queue();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

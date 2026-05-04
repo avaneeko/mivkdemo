@@ -1,6 +1,10 @@
 #ifndef VK_H
 #define VK_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <assert.h>
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -32,5 +36,9 @@ typedef struct {
 /* Initialize vulkan. */
 VkResult vk_init(vulkan* vk, HWND hwnd, unsigned short width, unsigned short height);
 uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t memory_type_bits, VkMemoryPropertyFlags required_properties);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
