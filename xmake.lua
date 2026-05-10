@@ -10,4 +10,5 @@ target("camellia")
     add_syslinks("user32", "gdi32")
 
     add_defines("_CRT_SECURE_NO_WARNINGS")
-    add_files("src/**.c")
+    add_includedirs("src/Core")
+    add_files("src/**.c", "src/**.cpp")
