@@ -15,7 +15,7 @@
 #define CHECK_IMPL(expr) \
     do \
     { \
-        if (not expr) [[unlikely]] \
+        if (not (expr)) [[unlikely]] \
         { \
             AssertionMacro::CheckFailure(#expr, __FILE__, __LINE__, __func__); \
             _MACRO_DEBUG_BREAK \
