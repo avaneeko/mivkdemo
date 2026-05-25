@@ -5,7 +5,6 @@
 #include <stdlib.h>
 
 // Creates a staging(CPU-visible) VkBuffer.
-static
 VkResult create_staging_vkbuf(VkDevice device, VkDeviceSize buffer_size, VkBuffer* out_buf)
 {
     VkBufferCreateInfo const info = {
@@ -41,7 +40,6 @@ VkResult create_device_local_vkbuf(VkDevice device, VkDeviceSize buffer_size, Vk
     return res;
 }
 
-static
 VkResult create_device_local_vkbuf_usage_bit(VkDevice device, VkDeviceSize buffer_size, VkBufferUsageFlagBits usage, VkBuffer* out_buf)
 {
     VkBufferCreateInfo const info = {
@@ -58,7 +56,6 @@ VkResult create_device_local_vkbuf_usage_bit(VkDevice device, VkDeviceSize buffe
     return res;
 }
 
-static
 VkResult alloc_staging_buffer_memory(VkDevice device, VkPhysicalDevice physical_device, VkBuffer buffer, VkDeviceSize allocation_size, VkDeviceMemory* out_memory)
 {
     VkMemoryRequirements mem_req;
@@ -74,7 +71,6 @@ VkResult alloc_staging_buffer_memory(VkDevice device, VkPhysicalDevice physical_
     return res;
 }
 
-static
 VkResult alloc_device_local_buffer_memory(VkDevice device, VkPhysicalDevice physical_device, VkBuffer buffer, VkDeviceSize allocation_size, VkDeviceMemory* out_memory)
 {
     VkMemoryRequirements mem_req;
@@ -438,7 +434,7 @@ VkDeviceSize calculate_image_size(VkFormat fmt, uint32_t width, uint32_t height)
         case VK_FORMAT_R8G8B8A8_SRGB:
             return width * height * 4;
         default:
-        fprintf(stderr, "Fatal error:\r\nRequesting a format unsupported by " __FUNCTION__ "\r\n");
+        fprintf(stderr, "Fatal error:\r\nRequesting a format unsupported by " "calculate_image_size" "\r\n");
         exit(1);
     }
 }

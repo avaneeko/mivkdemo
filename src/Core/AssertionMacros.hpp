@@ -32,7 +32,7 @@
 #endif
 
 #ifndef debug_break
-#define debug_break(expr) _MACRO_DEBUG_BREAK
+#define debug_break() _MACRO_DEBUG_BREAK
 #endif
 
 #endif

@@ -1,7 +1,9 @@
+#include "Core.hpp"
 #include <stdlib.h>
 #include <windows.h>
 #include <stdio.h>
 
+#include "SceneLoader.hpp"
 #include "tri_pipeline.h"
 #include "upload_gpu_data.h"
 #include "window.h"
@@ -32,6 +34,32 @@ static void get_frame(const vulkan* vk, frame_t* frame)
 
 int main(int argc, const char** argv)
 {
+    char const* TestSceneString;
+    if (argc > 1)
+    {
+        TestSceneString = argv[1];
+    }
+    else
+    {
+        TestSceneString = getenv("TEST_GLB_FILEPATH");
+    }
+
+    if (not TestSceneString)
+    {
+        fprintf(stderr, "No GLTF scene file provided.\r\n Pass argv[1] or TEST_GLB_FILEPATH env var.\r\n");
+    }
+
+    SceneLoader Loader;
+    std::vector<CScene> Scenes;
+    {// Testing SceneLoader
+        Loader.LoadScene(TestSceneString, Scenes);
+        printf("Scene count: %zu\r\n", Scenes.size());
+        for (size_t si = 0; si < Scenes.size(); si++) {
+            printf("  Scene %zu: \"%s\" has %zu instance(s)\r\n",
+                si, Scenes[si].Name.c_str(), Scenes[si].Instances.size());
+        }
+    }
+
     /* Create the window. */
     unsigned short width = 1280;
     unsigned short height = 720;
@@ -59,6 +87,10 @@ int main(int argc, const char** argv)
         }
         printf("Tri pipeline created!\r\n");
     }
+
+    VkResult LoaderUploadResult =
+        Loader.UploadMeshData(vk.device, vk.physical_device, vk.command_pools[0], vk.queue);
+    check(LoaderUploadResult == VK_SUCCESS);
 
     // testing
     float const data[] =
@@ -142,7 +174,7 @@ int main(int argc, const char** argv)
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}},
+            .clearValue = {.color = {0.0f, 0.0f, 0.0f, 1.0f}},
         };
 
         VkRenderingInfo rendering_info = {
@@ -167,7 +199,8 @@ int main(int argc, const char** argv)
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tri_pipeline);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, &(VkDeviceSize){0});
+        VkDeviceSize Offsets[1] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, Offsets);
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
         vkCmdEndRendering(cmd);
