@@ -4,10 +4,15 @@
 #include <stdio.h>
 
 #include "SceneLoader.hpp"
+#include "ScenePipeline.hpp"
 #include "tri_pipeline.h"
 #include "upload_gpu_data.h"
 #include "window.h"
 #include "vk.h"
+
+#include <cmath>
+#include <cstring>
+#include "FMat4.hpp"
 
 typedef struct {
     VkCommandPool cmd_pool;
@@ -88,6 +93,17 @@ int main(int argc, const char** argv)
         printf("Tri pipeline created!\r\n");
     }
 
+    FScenePipeline ScenePipeline;
+    {
+        VkResult SceneRes = CreateScenePipeline(vk.device, vk.surface_format, VK_FORMAT_D16_UNORM, &ScenePipeline);
+        if (SceneRes != VK_SUCCESS)
+        {
+            printf("Fatal error: Failed to create scene pipeline.\r\n");
+            exit(1);
+        }
+        printf("Scene pipeline created!\r\n");
+    }
+
     VkResult LoaderUploadResult =
         Loader.UploadMeshData(vk.device, vk.physical_device, vk.command_pools[0], vk.queue);
     check(LoaderUploadResult == VK_SUCCESS);
@@ -130,62 +146,95 @@ int main(int argc, const char** argv)
             .pInheritanceInfo = 0,
         };
 
-        float time = (float)(GetTickCount() % 256) / 255.0f;  // Cycles every 256 frames
-        VkClearValue clearColor = { {{ time, 0.0f, 1.0f - time, 1.0f }} };  // RGB shifts over time
-
         res = vkResetCommandBuffer(cmd, 0);
-        assert(res == VK_SUCCESS);
+        check(res == VK_SUCCESS);
 
         res = vkBeginCommandBuffer(cmd, &info);
-        assert(res == VK_SUCCESS);
+        check(res == VK_SUCCESS);
         /* Rendering command recording start. */
 
-        VkImageMemoryBarrier2 barrier_to_color = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .pNext = NULL,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-            .srcAccessMask = 0,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .srcQueueFamilyIndex = 0,
-            .dstQueueFamilyIndex = 0,
-            .image = vk.swapchain_images[swapchain_image_index],
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
+        /* Barriers: transition color + depth to attachment optimal */
+        VkImageMemoryBarrier2 barriers_to_attachments[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .pNext = NULL,
+                .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                .srcAccessMask = 0,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = 0,
+                .dstQueueFamilyIndex = 0,
+                .image = vk.swapchain_images[swapchain_image_index],
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .pNext = NULL,
+                .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                .srcAccessMask = 0,
+                .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = 0,
+                .dstQueueFamilyIndex = 0,
+                .image = vk.depth_buffer,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
             },
         };
 
-        VkDependencyInfo dep_to_color = {
+        VkDependencyInfo dep_to_attachments = {
             .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .imageMemoryBarrierCount = 1,
-            .pImageMemoryBarriers = &barrier_to_color,
+            .imageMemoryBarrierCount = 2,
+            .pImageMemoryBarriers = barriers_to_attachments,
         };
-        vkCmdPipelineBarrier2(cmd, &dep_to_color);
+        vkCmdPipelineBarrier2(cmd, &dep_to_attachments);
 
-        VkRenderingAttachmentInfo color_attachment = {
+        VkClearValue clearColor = { .color = { 0.07f, 0.07f, 0.12f, 1.0f } };
+        VkClearValue clearDepth = { .depthStencil = { 1.0f, 0 } };
+
+        VkRenderingAttachmentInfo colorAttachment = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = vk.swapchain_image_views[swapchain_image_index],
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue = {.color = {0.0f, 0.0f, 0.0f, 1.0f}},
+            .clearValue = clearColor,
         };
 
-        VkRenderingInfo rendering_info = {
+        VkRenderingAttachmentInfo depthAttachment = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = vk.depth_buffer_view,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue = clearDepth,
+        };
+
+        VkRenderingInfo renderingInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .renderArea = {.extent = vk.window_size},
+            .renderArea = { .extent = vk.window_size },
             .layerCount = 1,
             .colorAttachmentCount = 1,
-            .pColorAttachments = &color_attachment,
+            .pColorAttachments = &colorAttachment,
+            .pDepthAttachment = &depthAttachment,
         };
 
-        vkCmdBeginRendering(cmd, &rendering_info);
+        vkCmdBeginRendering(cmd, &renderingInfo);
 
         VkViewport viewport = {
             .width = (float)vk.window_size.width,
@@ -195,13 +244,49 @@ int main(int argc, const char** argv)
         };
         vkCmdSetViewport(cmd, 0, 1, &viewport);
 
-        VkRect2D scissor = {.extent = vk.window_size};
+        VkRect2D scissor = { .extent = vk.window_size };
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tri_pipeline);
-        VkDeviceSize Offsets[1] = {0};
-        vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, Offsets);
-        vkCmdDraw(cmd, 3, 1, 0, 0);
+        // Cam
+        float aspect = (float)vk.window_size.width / (float)vk.window_size.height;
+        float timeSec = (float)GetTickCount() * 0.001f;
+        float radius = 5.0f;
+        float camAngle = timeSec * 0.3f;
+
+        FVec3 eye = { radius * cosf(camAngle), radius * sinf(camAngle), 3.0f };
+        FVec3 target = { 0.0f, 0.0f, 0.0f };
+        FVec3 up = { 0.0f, 0.0f, 1.0f };
+
+        float fovY = 1.0f; // ~57 degrees
+        FMat4 proj = FMat4::Perspective(fovY, aspect, 0.1f, 1000.0f);
+        FMat4 view = FMat4::LookAt(eye, target, up);
+
+        // Draw scene
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ScenePipeline.Pipeline);
+
+        auto const& meshes = Loader.GetMeshes();
+
+        for (auto const& Scene : Scenes) {
+            for (auto const& Inst : Scene.Instances) {
+                auto const& mesh = meshes[Inst.MeshIndex];
+
+                FMat4 model = FMat4::FromFloat16(Inst.WorldMatrix);
+                FMat4 modelView = view * model;
+
+                // Push constants: { modelView, proj } = 128 bytes
+                struct { FMat4 modelView; FMat4 proj; } pushData;
+                pushData.modelView = modelView;
+                pushData.proj = proj;
+                vkCmdPushConstants(cmd, ScenePipeline.Layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushData), &pushData);
+
+                VkDeviceSize vbOffset = mesh.VertexBufferOffset;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &mesh.VertexBuffer, &vbOffset);
+                vkCmdBindIndexBuffer(cmd, mesh.IndexBuffer, mesh.IndexBufferOffset, mesh.IndexBufferType);
+
+                uint32_t indexCount = (uint32_t)(mesh.IndexBufferSize / (mesh.IndexBufferType == VK_INDEX_TYPE_UINT16 ? sizeof(uint16_t) : sizeof(uint32_t)));
+                vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+            }
+        }
 
         vkCmdEndRendering(cmd);
 
@@ -269,8 +354,10 @@ int main(int argc, const char** argv)
             assert(0);
         }
 
-        Sleep(1);
+        // Sleep(1);
     }
+
+    DestroyScenePipeline(vk.device, ScenePipeline);
 
     return 0;
 }

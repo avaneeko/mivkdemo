@@ -1,5 +1,6 @@
 #include "SceneLoader.hpp"
 #include "Core.hpp"
+#include "FMat4.hpp"
 #include <fastgltf/tools.hpp>
 #include <cstdio>
 
@@ -68,6 +69,7 @@ VkDeviceSize SceneLoader::CalculateBufferSizeRequirements(fastgltf::Asset const&
 
 void SceneLoader::AllocateMeshBufferAndMemory()
 {
+    // UNDONE: Remove.
     // VkBufferCreateInfo const info = {
     //     .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
     //     .pNext = NULL,
@@ -94,6 +96,7 @@ void SceneLoader::AllocateTextureMemory()
 
 void SceneLoader::AllocateVkResources()
 {
+    // UNDONE: Remove.
     AllocateMeshBufferAndMemory();
     AllocateTextureMemory();
 }
@@ -118,6 +121,16 @@ void ExtractStagingMeshesFromGtlf(fastgltf::Asset const& gltf, std::vector<CStag
             fastgltf::copyFromAccessor<fastgltf::math::fvec3, 32>(gltf, nrmAcc, Mesh.VertexData.data() + 12);
             fastgltf::copyFromAccessor<fastgltf::math::fvec2, 32>(gltf, texAcc, Mesh.VertexData.data() + 24);
             
+            // Swizzle in place from RH to LH. (Not needed anymore)
+            // for (uint32_t i = 0; i < Mesh.VertexCount; ++i) {
+            //     float* v = reinterpret_cast<float*>(Mesh.VertexData.data() + i * 32);
+            //     float x = v[0], y = v[1], z = v[2];
+            //     v[0] = -z; v[1] = x; v[2] = y;
+                
+            //     float nx = v[3], ny = v[4], nz = v[5];
+            //     v[3] = -nz; v[4] = nx; v[5] = ny;
+            // }
+
             // Index data
             if (primitive.indicesAccessor.has_value()) {
                 auto const& idxAcc = gltf.accessors[*primitive.indicesAccessor];
@@ -159,7 +172,12 @@ void SceneLoader::LoadScene(std::filesystem::path InPath, std::vector<CScene>& O
     }
 
     fastgltf::Parser Parser;
-    Expected<fastgltf::Asset> Asset = Parser.loadGltf(File.get(), InPath.root_path());
+    // Expected<fastgltf::Asset> Asset = Parser.loadGltf(File.get(), InPath.root_path(), fastgltf::Options::DontRequireValidAssetMember |
+    Expected<fastgltf::Asset> Asset = Parser.loadGltf(File.get(), InPath.parent_path(), fastgltf::Options::DontRequireValidAssetMember |
+    fastgltf::Options::LoadExternalBuffers |
+    fastgltf::Options::LoadExternalImages |
+    fastgltf::Options::GenerateMeshIndices |
+    fastgltf::Options::LoadExternalBuffers);
     if (Asset.error() != fastgltf::Error::None)
     {
         fprintf(stderr, "Fatal error: Parsing of %s scene has failed.\r\n", InPath.generic_string().c_str());
@@ -175,6 +193,15 @@ void SceneLoader::LoadScene(std::filesystem::path InPath, std::vector<CScene>& O
 
     ExtractStagingMeshesFromGtlf(Asset.get(), StagingMeshes, StagingMaterials);
 
+    // Build mapping: for each glTF mesh, which staging mesh index is its first primitive
+    std::vector<uint32_t> MeshPrimitiveStart;
+    MeshPrimitiveStart.reserve(Asset->meshes.size());
+    uint32_t stagingIdx = 0;
+    for (auto const& gltfMesh : Asset->meshes) {
+        MeshPrimitiveStart.push_back(stagingIdx);
+        stagingIdx += (uint32_t)gltfMesh.primitives.size();
+    }
+
     // Build one CScene per glTF scene
     OutScenes.clear();
     OutScenes.reserve(Asset->scenes.size());
@@ -188,13 +215,23 @@ void SceneLoader::LoadScene(std::filesystem::path InPath, std::vector<CScene>& O
         fastgltf::iterateSceneNodes(Asset.get(), si, fastgltf::math::fmat4x4(1.0f),
             [&](fastgltf::Node& node, fastgltf::math::fmat4x4 const& worldMatrix) {
                 if (node.meshIndex.has_value()) {
-                    FSceneInstance Instance;
-                    Instance.MeshIndex = (uint32_t)*node.meshIndex;
-                    // Copy the 4x4 matrix into our flat float array (column-major)
-                    float const* src = worldMatrix.data();
-                    for (int i = 0; i < 16; i++)
-                        Instance.WorldMatrix[i] = src[i];
-                    Scene.Instances.push_back(std::move(Instance));
+                    uint32_t meshIdx = (uint32_t)*node.meshIndex;
+                    auto const& gltfMesh = Asset->meshes[meshIdx];
+                    uint32_t baseStagingIdx = MeshPrimitiveStart[meshIdx];
+
+                    // Emit one instance per primitive (each primitive is a separate staging mesh + FMesh)
+                    for (uint32_t p = 0; p < (uint32_t)gltfMesh.primitives.size(); p++) {
+                        FSceneInstance Instance;
+                        Instance.MeshIndex = baseStagingIdx + p;
+
+                        // Convert from glTF Y-up RH to our Z-up LH coordinate system
+                        FMat4 world = FMat4::FromFloat16(worldMatrix.data());
+                        world = FMat4::ConvertYUpRHToZUpLH(world);
+                        for (int i = 0; i < 16; i++)
+                            Instance.WorldMatrix[i] = world[i];
+
+                        Scene.Instances.push_back(std::move(Instance));
+                    }
                 }
             });
 
@@ -290,7 +327,7 @@ VkResult SceneLoader::UploadMeshData(VkDevice Device, VkPhysicalDevice Physical,
 
         VkDeviceSize idxOffset = 0;
         for (auto& sm : StagingMeshes) {
-            VkDeviceSize meshIndexSize = sm.IndexData.size() * sizeof(uint32_t);
+            VkDeviceSize meshIndexSize = sm.IndexCount * (sm.IndexType == VK_INDEX_TYPE_UINT16 ? sizeof(uint16_t) : sizeof(uint32_t));
             memcpy(static_cast<std::byte*>(mapped) + idxOffset, sm.IndexData.data(), meshIndexSize);
             idxOffset += meshIndexSize;
         }

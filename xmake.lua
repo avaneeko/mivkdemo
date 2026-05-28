@@ -2,6 +2,7 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("vulkansdk")
 add_requires("fastgltf")
+add_requires("cglm")
 
 target("camellia")
     set_kind("binary")
@@ -9,6 +10,7 @@ target("camellia")
 
     add_packages("vulkansdk")
     add_packages("fastgltf")
+    add_packages("cglm")
     add_syslinks("user32", "gdi32")
 
 	if is_mode("debug") then
@@ -25,5 +27,6 @@ target("camellia")
     add_defines("_HAS_EXCEPTIONS=0", {tools = {"cl", "clang_cl"}})
     add_defines("NOMINMAX=1", {tools = {"cl", "clang_cl"}})
     add_defines("_CRT_SECURE_NO_WARNINGS")
+    add_defines("CGLM_FORCE_LEFT_HANDED")
     add_includedirs("src/Core")
     add_files("src/**.c", "src/**.cpp")
