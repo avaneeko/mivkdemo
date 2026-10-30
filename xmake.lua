@@ -1,7 +1,6 @@
 add_rules("mode.debug", "mode.release")
 
 add_requires("vulkansdk")
-add_requires("fastgltf")
 add_requires("cglm")
 
 target("camellia")
@@ -9,7 +8,6 @@ target("camellia")
     set_languages("c17", "c++20")
 
     add_packages("vulkansdk")
-    add_packages("fastgltf")
     add_packages("cglm")
     add_syslinks("user32", "gdi32")
 

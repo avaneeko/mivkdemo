@@ -52,6 +52,7 @@ int main(int argc, const char** argv)
     if (not TestSceneString)
     {
         fprintf(stderr, "No GLTF scene file provided.\r\n Pass argv[1] or TEST_GLB_FILEPATH env var.\r\n");
+        return EXIT_FAILURE;
     }
 
     SceneLoader Loader;
@@ -107,6 +108,10 @@ int main(int argc, const char** argv)
     VkResult LoaderUploadResult =
         Loader.UploadMeshData(vk.device, vk.physical_device, vk.command_pools[0], vk.queue);
     check(LoaderUploadResult == VK_SUCCESS);
+
+    VkResult LoaderTextureResult =
+        Loader.UploadTextureData(vk.device, vk.physical_device, vk.command_pools[0], vk.queue);
+    check(LoaderTextureResult == VK_SUCCESS);
 
     // testing
     float const data[] =

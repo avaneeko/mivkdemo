@@ -3,7 +3,10 @@
 
 #include "CScene.hpp"
 #include "FMesh.hpp"
-#include <fastgltf/core.hpp>
+#include "CTextureDecode.hpp"
+#include "texture_gpu.h"
+#include "third_party/cgltf.h"
+#include <filesystem>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -20,51 +23,45 @@ struct CStagingMesh
     uint16_t MaterialId; // Index into Staging Material Array.
 };
 
+// Each slot is an index into SceneLoader::StagingTextures. Missing slots reference a checker texture.
 struct CStagingMaterial
 {
-    // UNDONE:
-    // Store texture references or something.
+    uint32_t BaseColorTexture;
+    uint32_t MetallicRoughnessTexture;
+    uint32_t NormalTexture;
+    uint32_t OcclusionTexture;
+    uint32_t EmissiveTexture;
 };
 
 class SceneLoader
 {
     std::vector<CStagingMesh> StagingMeshes;
     std::vector<CStagingMaterial> StagingMaterials;
+    std::vector<CDecodedTexture> StagingTextures; // Decoded on CPU; uploaded by UploadTextureData.
 
     VkBuffer MeshBuffer;              // Buffer backing all meshes of the scene.
     VkDeviceMemory MeshMemory;        // It's memory.
-    VkDeviceSize MeshMemorySize;      // Total memory size.
-    VkDeviceSize MeshMemoryOffset;    // Offset into memory. Bumped when consuming/allocating.
     
     VkBuffer IndexBuffer;             // Buffer backing all mesh index data.
     VkDeviceMemory IndexMemory;       // It's memory.
 
     std::vector<FMesh> Meshes;        // GPU-ready mesh descriptors, filled by UploadMeshData.
-    
-    VkBuffer TextureBuffer;           // Buffer backing all textures of the scene.
-    VkDeviceMemory TextureMemory;     // It's memory.
-    VkDeviceSize TextureMemorySize;   // Total memory size.
-    VkDeviceSize TextureMemoryOffset; // Offset into memory. Bumped when consuming/allocating.
 
-    VkDevice Device; // Borrowed device handle.
+    gpu_texture_block Textures;       // All scene textures, in one device memory block.
+    VkSampler TextureSampler;
 
     // Estimates VkBuffer size for the entire all the scene's meshes.
-    VkDeviceSize EstimateSceneMeshMemory(fastgltf::Asset const& gltf);
-    // Estimates VkBuffer size for the entire all the scene's textures.
-    VkDeviceSize EstimateSceneTextureMemory(fastgltf::Asset const& gltf);
-    // Estimates VkBuffer size and requirements for the entire scene.
-    VkDeviceSize CalculateBufferSizeRequirements(fastgltf::Asset const& gltf);
-
-    void AllocateMeshBufferAndMemory();
-    void AllocateTextureMemory();
-    void AllocateVkResources();
+    VkDeviceSize EstimateSceneMeshMemory(cgltf_data const* gltf);
 
 public:
     void LoadScene(std::filesystem::path InPath, std::vector<CScene>& OutScenes);
 
     VkResult UploadMeshData(VkDevice device, VkPhysicalDevice physical, VkCommandPool cmd_pool, VkQueue queue);
+    VkResult UploadTextureData(VkDevice device, VkPhysicalDevice physical, VkCommandPool cmd_pool, VkQueue queue);
 
     std::vector<FMesh> const& GetMeshes() const { return Meshes; }
+    gpu_texture_block const& GetTextures() const { return Textures; }
+    VkSampler GetTextureSampler() const { return TextureSampler; }
 };
 
 #endif

@@ -1,24 +1,15 @@
 #include "SceneLoader.hpp"
 #include "Core.hpp"
 #include "FMat4.hpp"
-#include <fastgltf/tools.hpp>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <string>
 
 #include "upload_gpu_data.h"
-
-using fastgltf::Expected;
-using fastgltf::GltfDataBuffer;
-using fastgltf::Asset;
-
-void PrintMatrix(fastgltf::math::fmat4x4 const& InMatrix)
-{
-    float const* Data = InMatrix.data();
-    printf("%f %f %f %f\r\n%f %f %f %f\r\n%f %f %f %f\r\n%f %f %f %f\r\n\r\n",
-        Data[0],  Data[1],  Data[2],  Data[3],
-        Data[4],  Data[5],  Data[6],  Data[7],
-        Data[8],  Data[9],  Data[10], Data[11],
-        Data[12], Data[13], Data[14], Data[15]);
-}
 
 static
 VkDeviceSize AlignUp(VkDeviceSize InAddr, VkDeviceSize InAlignment)
@@ -26,28 +17,23 @@ VkDeviceSize AlignUp(VkDeviceSize InAddr, VkDeviceSize InAlignment)
     return (InAddr + InAlignment - 1) / InAlignment * InAlignment;
 }
 
-VkDeviceSize SceneLoader::EstimateSceneMeshMemory(fastgltf::Asset const& gltf)
+VkDeviceSize SceneLoader::EstimateSceneMeshMemory(cgltf_data const* gltf)
 {
     VkDeviceSize Total = 0;
     VkDeviceSize const BufferAlignment = 64; // Pessimistic guess. UNDONE: Probe with a dummy buffer?
 
-    for (const auto& Mesh : gltf.meshes)
-    {
-        for (const auto& primitive : Mesh.primitives) {
-            // Index buffer
-            if (primitive.indicesAccessor.has_value()) {
-                const auto& accessor = gltf.accessors[*primitive.indicesAccessor];
-                VkDeviceSize size = accessor.count * fastgltf::getElementByteSize(
-                    accessor.type, accessor.componentType);
-                Total += AlignUp(size, BufferAlignment);
+    for (cgltf_size m = 0; m < gltf->meshes_count; ++m) {
+        cgltf_mesh const& Mesh = gltf->meshes[m];
+        for (cgltf_size p = 0; p < Mesh.primitives_count; ++p) {
+            cgltf_primitive const& Primitive = Mesh.primitives[p];
+
+            if (Primitive.indices) {
+                Total += AlignUp(Primitive.indices->count * Primitive.indices->stride, BufferAlignment);
             }
-            
-            // Vertex attributes (POSITION, NORMAL, TEXCOORD_0, TANGENT
-            for (const auto& attribute : primitive.attributes) {
-                const auto& accessor = gltf.accessors[attribute.accessorIndex];
-                VkDeviceSize size = accessor.count * fastgltf::getElementByteSize(
-                    accessor.type, accessor.componentType);
-                Total += AlignUp(size, BufferAlignment);
+
+            for (cgltf_size a = 0; a < Primitive.attributes_count; ++a) {
+                cgltf_accessor const* Accessor = Primitive.attributes[a].data;
+                Total += AlignUp(Accessor->count * Accessor->stride, BufferAlignment);
             }
         }
     }
@@ -55,188 +41,328 @@ VkDeviceSize SceneLoader::EstimateSceneMeshMemory(fastgltf::Asset const& gltf)
     return Total;
 }
 
-VkDeviceSize SceneLoader::EstimateSceneTextureMemory(fastgltf::Asset const& gltf)
+namespace
 {
-    VkDeviceSize Total = 0;
+    cgltf_accessor const* FindAttribute(cgltf_primitive const& Primitive, cgltf_attribute_type Type)
+    {
+        for (cgltf_size i = 0; i < Primitive.attributes_count; ++i) {
+            cgltf_attribute const& Attribute = Primitive.attributes[i];
+            if (Attribute.type == Type && Attribute.index == 0)
+                return Attribute.data;
+        }
+        return nullptr;
+    }
 
-    return Total;
+    // Primitives without POSITION are skipped everywhere, so staging and instance indices stay in step.
+    bool IsDrawablePrimitive(cgltf_primitive const& Primitive)
+    {
+        return FindAttribute(Primitive, cgltf_attribute_type_position) != nullptr;
+    }
+
+    // Writes Elements floats per vertex at Dst, with a 32-byte vertex stride.
+    void CopyVertexAttribute(cgltf_accessor const* Accessor, uint32_t VertexCount, cgltf_size Elements, std::byte* Dst)
+    {
+        for (uint32_t i = 0; i < VertexCount; ++i) {
+            float Value[4] = {};
+            cgltf_accessor_read_float(Accessor, i, Value, Elements);
+            std::memcpy(Dst + (size_t)i * 32, Value, Elements * sizeof(float));
+        }
+    }
 }
 
-VkDeviceSize SceneLoader::CalculateBufferSizeRequirements(fastgltf::Asset const& gltf)
+void ExtractStagingMeshesFromGtlf(cgltf_data const* gltf, std::vector<CStagingMesh>& OutStagingMeshes)
 {
-    return EstimateSceneMeshMemory(gltf) + EstimateSceneTextureMemory(gltf);
-}
+    for (cgltf_size m = 0; m < gltf->meshes_count; ++m) {
+        cgltf_mesh const& gltfMesh = gltf->meshes[m];
+        for (cgltf_size p = 0; p < gltfMesh.primitives_count; ++p) {
+            cgltf_primitive const& primitive = gltfMesh.primitives[p];
+            if (!IsDrawablePrimitive(primitive)) {
+                fprintf(stderr, "WARNING: Skipping primitive %zu of mesh %zu: no POSITION attribute.\r\n", p, m);
+                continue;
+            }
 
-void SceneLoader::AllocateMeshBufferAndMemory()
-{
-    // UNDONE: Remove.
-    // VkBufferCreateInfo const info = {
-    //     .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-    //     .pNext = NULL,
-    //     .flags = 0,
-    //     .size = MeshMemorySize,
-    //     .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-    //     .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    //     .queueFamilyIndexCount = 0,
-    //     .pQueueFamilyIndices = NULL,
-    // };
-    // VkResult res = vkCreateBuffer(device, &info, NULL, &MeshBuffer);
-}
-
-void SceneLoader::AllocateTextureMemory()
-{
-    // Should this allocate images and image views?
-    fprintf(stderr, "WARNING: AllocateTextureMemory() function is not implemented! Did"
-        "not allocate any memory for scene textures.\r\n");
-
-    TextureBuffer = VK_NULL_HANDLE;
-    TextureMemory = VK_NULL_HANDLE;
-    TextureMemoryOffset = 0;
-}
-
-void SceneLoader::AllocateVkResources()
-{
-    // UNDONE: Remove.
-    AllocateMeshBufferAndMemory();
-    AllocateTextureMemory();
-}
-
-void ExtractStagingMeshesFromGtlf(fastgltf::Asset const& gltf, std::vector<CStagingMesh>& OutStagingMeshes, std::vector<CStagingMaterial>& OutStagingMaterials)
-{
-    for (auto const& gltfMesh : gltf.meshes) {
-        for (auto const& primitive : gltfMesh.primitives) {
             CStagingMesh Mesh;
-            
-            // Interleave vertex data using fastgltf accessor iteration
-            auto const& posAcc = gltf.accessors[primitive.findAttribute("POSITION")->accessorIndex];
-            auto const& nrmAcc = gltf.accessors[primitive.findAttribute("NORMAL")->accessorIndex];
-            auto const& texAcc = gltf.accessors[primitive.findAttribute("TEXCOORD_0")->accessorIndex];
-            
-            Mesh.VertexCount = (uint32_t)posAcc.count;
-            Mesh.VertexStride = 32; // 3+3+2 floats
-            Mesh.VertexData.resize(Mesh.VertexCount * Mesh.VertexStride);
-            
-            // Use copyFromAccessor with TargetStride to interleave into the vertex buffer
-            fastgltf::copyFromAccessor<fastgltf::math::fvec3, 32>(gltf, posAcc, Mesh.VertexData.data());
-            fastgltf::copyFromAccessor<fastgltf::math::fvec3, 32>(gltf, nrmAcc, Mesh.VertexData.data() + 12);
-            fastgltf::copyFromAccessor<fastgltf::math::fvec2, 32>(gltf, texAcc, Mesh.VertexData.data() + 24);
-            
-            // Swizzle in place from RH to LH. (Not needed anymore)
-            // for (uint32_t i = 0; i < Mesh.VertexCount; ++i) {
-            //     float* v = reinterpret_cast<float*>(Mesh.VertexData.data() + i * 32);
-            //     float x = v[0], y = v[1], z = v[2];
-            //     v[0] = -z; v[1] = x; v[2] = y;
-                
-            //     float nx = v[3], ny = v[4], nz = v[5];
-            //     v[3] = -nz; v[4] = nx; v[5] = ny;
-            // }
+            cgltf_accessor const* PosAcc = FindAttribute(primitive, cgltf_attribute_type_position);
+            cgltf_accessor const* NrmAcc = FindAttribute(primitive, cgltf_attribute_type_normal);
+            cgltf_accessor const* TexAcc = FindAttribute(primitive, cgltf_attribute_type_texcoord);
 
-            // Index data
-            if (primitive.indicesAccessor.has_value()) {
-                auto const& idxAcc = gltf.accessors[*primitive.indicesAccessor];
-                Mesh.IndexCount = (uint32_t)idxAcc.count;
-                size_t idxSize = fastgltf::getElementByteSize(idxAcc.type, idxAcc.componentType);
-                Mesh.IndexData.resize(Mesh.IndexCount * (idxAcc.componentType == fastgltf::ComponentType::UnsignedShort ? 2 : 4));
-                
-                Mesh.IndexType = (idxAcc.componentType == fastgltf::ComponentType::UnsignedShort)
-                    ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
-                if (Mesh.IndexType == VK_INDEX_TYPE_UINT16)
-                {
-                    fastgltf::copyFromAccessor<uint16_t>(gltf, idxAcc, Mesh.IndexData.data());
-                }
-                else
-                {
-                    check(Mesh.IndexType == VK_INDEX_TYPE_UINT32);
-                    fastgltf::copyFromAccessor<uint32_t>(gltf, idxAcc, Mesh.IndexData.data());
+            Mesh.VertexCount = (uint32_t)PosAcc->count;
+            Mesh.VertexStride = 32; // 3+3+2 floats
+            Mesh.VertexData.resize(Mesh.VertexCount * Mesh.VertexStride); // Zero-filled, so missing NORMAL/UVs read as 0.
+
+            CopyVertexAttribute(PosAcc, Mesh.VertexCount, 3, Mesh.VertexData.data());
+            if (NrmAcc)
+                CopyVertexAttribute(NrmAcc, Mesh.VertexCount, 3, Mesh.VertexData.data() + 12);
+            if (TexAcc)
+                CopyVertexAttribute(TexAcc, Mesh.VertexCount, 2, Mesh.VertexData.data() + 24);
+
+            if (primitive.indices) {
+                cgltf_accessor const* IdxAcc = primitive.indices;
+                bool const bU16 = IdxAcc->component_type == cgltf_component_type_r_16u;
+                Mesh.IndexCount = (uint32_t)IdxAcc->count;
+                Mesh.IndexType = bU16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+
+                size_t const ElementSize = bU16 ? sizeof(uint16_t) : sizeof(uint32_t);
+                Mesh.IndexData.resize((Mesh.IndexCount * ElementSize + sizeof(uint32_t) - 1) / sizeof(uint32_t));
+                std::byte* Dst = reinterpret_cast<std::byte*>(Mesh.IndexData.data());
+                for (uint32_t i = 0; i < Mesh.IndexCount; ++i) {
+                    uint32_t const Index = (uint32_t)cgltf_accessor_read_index(IdxAcc, i);
+                    if (bU16) {
+                        uint16_t const Index16 = (uint16_t)Index;
+                        std::memcpy(Dst + i * sizeof(uint16_t), &Index16, sizeof(Index16));
+                    } else {
+                        std::memcpy(Dst + i * sizeof(uint32_t), &Index, sizeof(Index));
+                    }
                 }
             }
-            
-            // Material lookup
-            if (primitive.materialIndex.has_value()) {
-                // Convert glTF material → FStagingMaterial if not already done
-                Mesh.MaterialId = (uint16_t)*primitive.materialIndex;
-            }
+
+            // The default material is appended after the glTF materials.
+            Mesh.MaterialId = primitive.material
+                ? (uint16_t)cgltf_material_index(gltf, primitive.material)
+                : (uint16_t)gltf->materials_count;
 
             OutStagingMeshes.push_back(std::move(Mesh));
         }
     }
 }
 
+namespace
+{
+    // Fixed slots at the front of StagingTextures; every missing material slot points at one of these.
+    constexpr uint32_t CheckerSRGBTexture = 0;
+    constexpr uint32_t CheckerLinearTexture = 1;
+
+    int Base64Value(char c)
+    {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    }
+
+    bool DecodeBase64(std::string const& Text, std::vector<std::byte>& Out)
+    {
+        Out.clear();
+        uint32_t Accumulator = 0;
+        int Bits = 0;
+        for (char c : Text) {
+            if (c == '=')
+                break;
+            if (c == '\r' || c == '\n' || c == ' ')
+                continue;
+            int const Value = Base64Value(c);
+            if (Value < 0)
+                return false;
+            Accumulator = (Accumulator << 6) | (uint32_t)Value;
+            Bits += 6;
+            if (Bits >= 8) {
+                Bits -= 8;
+                Out.push_back(std::byte((Accumulator >> Bits) & 0xFF));
+            }
+        }
+        return true;
+    }
+
+    bool ReadFileBytes(std::filesystem::path const& Path, std::vector<std::byte>& Out)
+    {
+        std::ifstream File(Path, std::ios::binary | std::ios::ate);
+        if (!File)
+            return false;
+        std::streamoff const Size = File.tellg();
+        Out.resize((size_t)Size);
+        File.seekg(0);
+        return static_cast<bool>(File.read(reinterpret_cast<char*>(Out.data()), Size));
+    }
+
+    // Returns the image bytes. Buffer-view bytes point into the cgltf_data; data URIs and
+    // external files are read into Storage, which the caller keeps alive while decoding.
+    bool GetImageBytes(cgltf_image const* Image, std::filesystem::path const& BaseDir,
+        std::vector<std::byte>& Storage, std::byte const*& Data, size_t& Size)
+    {
+        if (Image->buffer_view) {
+            Data = reinterpret_cast<std::byte const*>(cgltf_buffer_view_data(Image->buffer_view));
+            Size = Image->buffer_view->size;
+            return Data != nullptr;
+        }
+
+        if (!Image->uri)
+            return false;
+
+        std::string const Uri = Image->uri;
+        constexpr char DataPrefix[] = "data:";
+        if (Uri.compare(0, sizeof(DataPrefix) - 1, DataPrefix) == 0) {
+            size_t const Comma = Uri.find(',');
+            if (Comma == std::string::npos || Uri.substr(0, Comma).find(";base64") == std::string::npos)
+                return false;
+            if (!DecodeBase64(Uri.substr(Comma + 1), Storage))
+                return false;
+        } else {
+            std::string Decoded = Uri;
+            Decoded.resize(cgltf_decode_uri(Decoded.data()));
+            if (!ReadFileBytes(BaseDir / Decoded, Storage))
+                return false;
+        }
+
+        Data = Storage.data();
+        Size = Storage.size();
+        return true;
+    }
+
+    // Maps glTF texture references to StagingTextures indices, decoding each (image, colour space) pair once.
+    struct TextureTable
+    {
+        cgltf_data const* Gltf;
+        std::filesystem::path const& BaseDir;
+        std::vector<CDecodedTexture>& Textures;
+        std::map<std::pair<cgltf_image const*, bool>, uint32_t> ImageCache;
+
+        uint32_t Resolve(cgltf_texture_view const& View, bool bSRGB)
+        {
+            uint32_t const Checker = bSRGB ? CheckerSRGBTexture : CheckerLinearTexture;
+            cgltf_image const* Image = View.texture ? View.texture->image : nullptr;
+            if (!Image)
+                return Checker;
+
+            auto const Key = std::make_pair(Image, bSRGB);
+            if (auto const It = ImageCache.find(Key); It != ImageCache.end())
+                return It->second;
+
+            uint32_t Index = Checker;
+            std::vector<std::byte> Storage;
+            std::byte const* Data = nullptr;
+            size_t Size = 0;
+            CDecodedTexture Decoded;
+            if (GetImageBytes(Image, BaseDir, Storage, Data, Size) && DecodeTextureBytes(Data, Size, bSRGB, Decoded)) {
+                Index = (uint32_t)Textures.size();
+                Textures.push_back(std::move(Decoded));
+            } else {
+                fprintf(stderr, "WARNING: Could not decode image %zu, using checker texture.\r\n",
+                    (size_t)(Image - Gltf->images));
+            }
+
+            ImageCache.emplace(Key, Index);
+            return Index;
+        }
+    };
+}
+
+void ExtractStagingMaterialsFromGltf(cgltf_data const* gltf, std::vector<CStagingMaterial>& OutStagingMaterials,
+    std::vector<CDecodedTexture>& OutStagingTextures, std::filesystem::path const& BaseDir)
+{
+    OutStagingTextures.clear();
+    OutStagingTextures.push_back(MakeCheckerTexture(true));
+    OutStagingTextures.push_back(MakeCheckerTexture(false));
+
+    OutStagingMaterials.clear();
+    TextureTable Table{ gltf, BaseDir, OutStagingTextures, {} };
+
+    for (cgltf_size i = 0; i < gltf->materials_count; ++i)
+    {
+        cgltf_material const& Material = gltf->materials[i];
+        CStagingMaterial Staging;
+        Staging.BaseColorTexture = Table.Resolve(Material.pbr_metallic_roughness.base_color_texture, true);
+        Staging.MetallicRoughnessTexture = Table.Resolve(Material.pbr_metallic_roughness.metallic_roughness_texture, false);
+        Staging.NormalTexture = Table.Resolve(Material.normal_texture, false);
+        Staging.OcclusionTexture = Table.Resolve(Material.occlusion_texture, false);
+        Staging.EmissiveTexture = Table.Resolve(Material.emissive_texture, true);
+        OutStagingMaterials.push_back(Staging);
+    }
+
+    // Used by primitives that reference no material.
+    OutStagingMaterials.push_back(CStagingMaterial{
+        CheckerSRGBTexture, CheckerLinearTexture, CheckerLinearTexture, CheckerLinearTexture, CheckerSRGBTexture });
+}
+
+namespace
+{
+    void EmitNodeInstances(cgltf_data const* Gltf, cgltf_node const* Node,
+        std::vector<uint32_t> const& MeshPrimitiveStart, CScene& Scene)
+    {
+        if (Node->mesh) {
+            uint32_t const MeshIdx = (uint32_t)cgltf_mesh_index(Gltf, Node->mesh);
+
+            float WorldMatrix[16];
+            cgltf_node_transform_world(Node, WorldMatrix);
+            // Convert from glTF Y-up RH to our Z-up LH coordinate system
+            FMat4 World = FMat4::ConvertYUpRHToZUpLH(FMat4::FromFloat16(WorldMatrix));
+
+            // Emit one instance per primitive (each primitive is a separate staging mesh + FMesh)
+            uint32_t StagingIdx = MeshPrimitiveStart[MeshIdx];
+            for (cgltf_size p = 0; p < Node->mesh->primitives_count; ++p) {
+                if (!IsDrawablePrimitive(Node->mesh->primitives[p]))
+                    continue;
+
+                FSceneInstance Instance;
+                Instance.MeshIndex = StagingIdx++;
+                for (int i = 0; i < 16; i++)
+                    Instance.WorldMatrix[i] = World[i];
+                Scene.Instances.push_back(Instance);
+            }
+        }
+
+        for (cgltf_size c = 0; c < Node->children_count; ++c)
+            EmitNodeInstances(Gltf, Node->children[c], MeshPrimitiveStart, Scene);
+    }
+}
+
 void SceneLoader::LoadScene(std::filesystem::path InPath, std::vector<CScene>& OutScenes)
 {
-    Expected<GltfDataBuffer> File = fastgltf::GltfDataBuffer::FromPath(InPath);
-    if (File.error() != fastgltf::Error::None)
+    std::string const PathString = InPath.generic_string();
+
+    cgltf_options Options = {};
+    cgltf_data* Gltf = nullptr;
+    if (cgltf_parse_file(&Options, PathString.c_str(), &Gltf) != cgltf_result_success)
     {
-        fprintf(stderr, "Fatal error: Could not open %s scene file.\r\n", InPath.generic_string().c_str());
+        fprintf(stderr, "Fatal error: Could not open or parse %s scene file.\r\n", PathString.c_str());
+        return;
+    }
+    if (cgltf_load_buffers(&Options, Gltf, PathString.c_str()) != cgltf_result_success)
+    {
+        fprintf(stderr, "Fatal error: Could not load buffers of %s scene.\r\n", PathString.c_str());
+        cgltf_free(Gltf);
         return;
     }
 
-    fastgltf::Parser Parser;
-    // Expected<fastgltf::Asset> Asset = Parser.loadGltf(File.get(), InPath.root_path(), fastgltf::Options::DontRequireValidAssetMember |
-    Expected<fastgltf::Asset> Asset = Parser.loadGltf(File.get(), InPath.parent_path(), fastgltf::Options::DontRequireValidAssetMember |
-    fastgltf::Options::LoadExternalBuffers |
-    fastgltf::Options::LoadExternalImages |
-    fastgltf::Options::GenerateMeshIndices |
-    fastgltf::Options::LoadExternalBuffers);
-    if (Asset.error() != fastgltf::Error::None)
-    {
-        fprintf(stderr, "Fatal error: Parsing of %s scene has failed.\r\n", InPath.generic_string().c_str());
-        return;
-    }
-
-    VkDeviceSize SceneMemorySize = EstimateSceneMeshMemory(Asset.get());
+    VkDeviceSize SceneMemorySize = EstimateSceneMeshMemory(Gltf);
     fprintf(stderr, "Estimated scene mesh memory requirement is: %zu\r\n", SceneMemorySize);
 
     StagingMeshes.clear();
-    StagingMeshes.reserve(Asset->meshes.size());
-    StagingMaterials.clear();
+    StagingMeshes.reserve(Gltf->meshes_count);
 
-    ExtractStagingMeshesFromGtlf(Asset.get(), StagingMeshes, StagingMaterials);
+    ExtractStagingMaterialsFromGltf(Gltf, StagingMaterials, StagingTextures, InPath.parent_path());
+    ExtractStagingMeshesFromGtlf(Gltf, StagingMeshes);
 
     // Build mapping: for each glTF mesh, which staging mesh index is its first primitive
     std::vector<uint32_t> MeshPrimitiveStart;
-    MeshPrimitiveStart.reserve(Asset->meshes.size());
+    MeshPrimitiveStart.reserve(Gltf->meshes_count);
     uint32_t stagingIdx = 0;
-    for (auto const& gltfMesh : Asset->meshes) {
+    for (cgltf_size m = 0; m < Gltf->meshes_count; ++m) {
         MeshPrimitiveStart.push_back(stagingIdx);
-        stagingIdx += (uint32_t)gltfMesh.primitives.size();
+        for (cgltf_size p = 0; p < Gltf->meshes[m].primitives_count; ++p) {
+            if (IsDrawablePrimitive(Gltf->meshes[m].primitives[p]))
+                ++stagingIdx;
+        }
     }
 
     // Build one CScene per glTF scene
     OutScenes.clear();
-    OutScenes.reserve(Asset->scenes.size());
+    OutScenes.reserve(Gltf->scenes_count);
 
-    for (size_t si = 0; si < Asset->scenes.size(); si++)
+    for (cgltf_size si = 0; si < Gltf->scenes_count; si++)
     {
-        auto const& gltfScene = Asset->scenes[si];
+        cgltf_scene const& gltfScene = Gltf->scenes[si];
         CScene Scene;
-        Scene.Name = gltfScene.name;
+        Scene.Name = gltfScene.name ? gltfScene.name : "";
 
-        fastgltf::iterateSceneNodes(Asset.get(), si, fastgltf::math::fmat4x4(1.0f),
-            [&](fastgltf::Node& node, fastgltf::math::fmat4x4 const& worldMatrix) {
-                if (node.meshIndex.has_value()) {
-                    uint32_t meshIdx = (uint32_t)*node.meshIndex;
-                    auto const& gltfMesh = Asset->meshes[meshIdx];
-                    uint32_t baseStagingIdx = MeshPrimitiveStart[meshIdx];
-
-                    // Emit one instance per primitive (each primitive is a separate staging mesh + FMesh)
-                    for (uint32_t p = 0; p < (uint32_t)gltfMesh.primitives.size(); p++) {
-                        FSceneInstance Instance;
-                        Instance.MeshIndex = baseStagingIdx + p;
-
-                        // Convert from glTF Y-up RH to our Z-up LH coordinate system
-                        FMat4 world = FMat4::FromFloat16(worldMatrix.data());
-                        world = FMat4::ConvertYUpRHToZUpLH(world);
-                        for (int i = 0; i < 16; i++)
-                            Instance.WorldMatrix[i] = world[i];
-
-                        Scene.Instances.push_back(std::move(Instance));
-                    }
-                }
-            });
+        for (cgltf_size n = 0; n < gltfScene.nodes_count; ++n)
+            EmitNodeInstances(Gltf, gltfScene.nodes[n], MeshPrimitiveStart, Scene);
 
         OutScenes.push_back(std::move(Scene));
     }
+
+    cgltf_free(Gltf);
 
     printf("Loaded %zu scene(s), %zu total mesh instance(s)\r\n",
         OutScenes.size(), StagingMeshes.size());
@@ -250,7 +376,7 @@ VkResult SceneLoader::UploadMeshData(VkDevice Device, VkPhysicalDevice Physical,
     VkDeviceSize TotalIndexSize = 0;
     for (auto const& sm : StagingMeshes) {
         TotalVertexSize += sm.VertexData.size();
-        TotalIndexSize += sm.IndexData.size() * sizeof(uint32_t);
+        TotalIndexSize += sm.IndexCount * (sm.IndexType == VK_INDEX_TYPE_UINT16 ? sizeof(uint16_t) : sizeof(uint32_t));
     }
 
     if (TotalVertexSize == 0) {
@@ -382,8 +508,28 @@ VkResult SceneLoader::UploadMeshData(VkDevice Device, VkPhysicalDevice Physical,
     printf("Uploaded %zu mesh(es): vertex buffer %llu bytes, index buffer %llu bytes\r\n",
         Meshes.size(), (unsigned long long)TotalVertexSize, (unsigned long long)TotalIndexSize);
 
-    MeshMemorySize = TotalVertexSize;
-    MeshMemoryOffset = 0;
+    return VK_SUCCESS;
+}
+
+VkResult SceneLoader::UploadTextureData(VkDevice Device, VkPhysicalDevice Physical,
+    VkCommandPool CmdPool, VkQueue Queue)
+{
+    std::vector<gpu_texture_source> Sources;
+    Sources.reserve(StagingTextures.size());
+    for (auto const& Texture : StagingTextures)
+        Sources.push_back(gpu_texture_source{ Texture.Pixels.data(), Texture.Width, Texture.Height, Texture.Format });
+
+    VkResult Result = create_texture_block(Device, Physical, CmdPool, Queue,
+        Sources.data(), (uint32_t)Sources.size(), &Textures);
+    if (Result != VK_SUCCESS)
+        return Result;
+
+    Result = create_texture_sampler(Device, &TextureSampler);
+    if (Result != VK_SUCCESS)
+    {
+        destroy_texture_block(Device, &Textures);
+        return Result;
+    }
 
     return VK_SUCCESS;
 }
