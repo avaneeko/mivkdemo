@@ -7,12 +7,13 @@
 
 #include <vulkan/vulkan.h>
 
-// CPU-side texture data ready for upload. Pixels are tightly packed for Format.
+// CPU-side texture data ready for upload. Pixels hold MipLevels tightly packed levels, largest first.
 struct CDecodedTexture
 {
     std::vector<std::byte> Pixels;
     uint32_t Width = 0;
     uint32_t Height = 0;
+    uint32_t MipLevels = 1;
     VkFormat Format = VK_FORMAT_UNDEFINED;
 };
 

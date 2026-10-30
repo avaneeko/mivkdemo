@@ -2,6 +2,7 @@
 #include "upload_gpu_data.h"
 #include "vk.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,8 +14,25 @@ static VkDeviceSize align_up(VkDeviceSize value, VkDeviceSize alignment)
     return (value + alignment - 1) / alignment * alignment;
 }
 
+static uint32_t mip_extent(uint32_t extent, uint32_t level)
+{
+    uint32_t const shifted = extent >> level;
+    return shifted ? shifted : 1;
+}
+
+static uint32_t mip_level_count(uint32_t width, uint32_t height)
+{
+    uint32_t largest = width > height ? width : height;
+    uint32_t levels = 1;
+    while (largest > 1) {
+        largest >>= 1;
+        levels++;
+    }
+    return levels;
+}
+
 // Byte size of one tightly packed mip level. Extend here when adding new formats.
-static VkDeviceSize texture_byte_size(VkFormat format, uint32_t width, uint32_t height)
+static VkDeviceSize level_byte_size(VkFormat format, uint32_t width, uint32_t height)
 {
     switch (format) {
     case VK_FORMAT_R8G8B8A8_SRGB:
@@ -28,6 +46,14 @@ static VkDeviceSize texture_byte_size(VkFormat format, uint32_t width, uint32_t 
     }
 }
 
+static VkDeviceSize source_byte_size(gpu_texture_source const* src)
+{
+    VkDeviceSize total = 0;
+    for (uint32_t level = 0; level < src->mip_levels; level++)
+        total += level_byte_size(src->format, mip_extent(src->width, level), mip_extent(src->height, level));
+    return total;
+}
+
 static VkResult create_image_handles(VkDevice device, VkPhysicalDevice physical, gpu_texture_source const* sources, uint32_t count, gpu_texture_block* out, VkDeviceSize* image_offsets, VkDeviceSize* byte_sizes, VkDeviceSize* staging_offsets, VkDeviceSize* out_staging_size)
 {
     VkDeviceSize block_size = 0;
@@ -37,9 +63,14 @@ static VkResult create_image_handles(VkDevice device, VkPhysicalDevice physical,
     for (uint32_t i = 0; i < count; i++) {
         gpu_texture_source const* src = &sources[i];
 
-        byte_sizes[i] = texture_byte_size(src->format, src->width, src->height);
-        if (byte_sizes[i] == 0)
+        if (level_byte_size(src->format, src->width, src->height) == 0)
             return VK_ERROR_FORMAT_NOT_SUPPORTED;
+        // Blit-based generation only works on uncompressed formats.
+        bool const compressed = src->format == VK_FORMAT_BC1_RGBA_SRGB_BLOCK || src->format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        uint32_t const full_levels = mip_level_count(src->width, src->height);
+        if (src->mip_levels == 0 || src->mip_levels > full_levels || (compressed && src->mip_levels != full_levels))
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+        byte_sizes[i] = source_byte_size(src);
 
         VkImageCreateInfo const info = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -48,11 +79,11 @@ static VkResult create_image_handles(VkDevice device, VkPhysicalDevice physical,
             .imageType = VK_IMAGE_TYPE_2D,
             .format = src->format,
             .extent = { src->width, src->height, 1 },
-            .mipLevels = 1,
+            .mipLevels = mip_level_count(src->width, src->height),
             .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = NULL,
@@ -97,6 +128,60 @@ static VkResult create_image_handles(VkDevice device, VkPhysicalDevice physical,
 
     *out_staging_size = staging_size;
     return VK_SUCCESS;
+}
+
+static void barrier_levels(VkCommandBuffer cmd, VkImage image, uint32_t base_level, uint32_t level_count,
+    VkImageLayout old_layout, VkImageLayout new_layout,
+    VkPipelineStageFlags src_stage, VkAccessFlags src_access,
+    VkPipelineStageFlags dst_stage, VkAccessFlags dst_access)
+{
+    VkImageMemoryBarrier const barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = base_level,
+            .levelCount = level_count,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
+// Expects level 0 to hold the source pixels in TRANSFER_DST_OPTIMAL. Leaves every level in SHADER_READ_ONLY_OPTIMAL.
+static void generate_mip_chain(VkCommandBuffer cmd, VkImage image, gpu_texture_source const* src, uint32_t level_count)
+{
+    for (uint32_t level = 1; level < level_count; level++) {
+        barrier_levels(cmd, image, level - 1, 1,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+        VkImageBlit const blit = {
+            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1 },
+            .srcOffsets = { { 0, 0, 0 }, { mip_extent(src->width, level - 1), mip_extent(src->height, level - 1), 1 } },
+            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 },
+            .dstOffsets = { { 0, 0, 0 }, { mip_extent(src->width, level), mip_extent(src->height, level), 1 } },
+        };
+        vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+        barrier_levels(cmd, image, level - 1, 1,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    }
+
+    barrier_levels(cmd, image, level_count - 1, 1,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 }
 
 static VkResult upload_texture_pixels(VkDevice device, VkPhysicalDevice physical, VkCommandPool cmd_pool, VkQueue queue, gpu_texture_source const* sources, uint32_t count, gpu_texture_block const* block, VkDeviceSize const* byte_sizes, VkDeviceSize const* staging_offsets, VkDeviceSize staging_size)
@@ -146,44 +231,36 @@ static VkResult upload_texture_pixels(VkDevice device, VkPhysicalDevice physical
     };
     vkBeginCommandBuffer(cmd, &begin);
 
-    VkImageSubresourceRange const whole_image = {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
-
     for (uint32_t i = 0; i < count; i++) {
-        VkImageMemoryBarrier to_transfer = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .srcAccessMask = 0,
-            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = block->images[i],
-            .subresourceRange = whole_image,
-        };
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &to_transfer);
+        gpu_texture_source const* src = &sources[i];
+        uint32_t const full_levels = mip_level_count(src->width, src->height);
 
-        VkBufferImageCopy const region = {
-            .bufferOffset = staging_offsets[i],
-            .bufferRowLength = 0,   // Tightly packed.
-            .bufferImageHeight = 0,
-            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-            .imageOffset = { 0, 0, 0 },
-            .imageExtent = { sources[i].width, sources[i].height, 1 },
-        };
-        vkCmdCopyBufferToImage(cmd, staging, block->images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        barrier_levels(cmd, block->images[i], 0, full_levels,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
-        VkImageMemoryBarrier to_shader = to_transfer;
-        to_shader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        to_shader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        to_shader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &to_shader);
+        VkDeviceSize level_offset = 0;
+        for (uint32_t level = 0; level < src->mip_levels; level++) {
+            uint32_t const width = mip_extent(src->width, level);
+            uint32_t const height = mip_extent(src->height, level);
+            VkBufferImageCopy const region = {
+                .bufferOffset = staging_offsets[i] + level_offset,
+                .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 },
+                .imageExtent = { width, height, 1 },
+            };
+            vkCmdCopyBufferToImage(cmd, staging, block->images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            level_offset += level_byte_size(src->format, width, height);
+        }
+
+        if (src->mip_levels < full_levels) {
+            generate_mip_chain(cmd, block->images[i], src, full_levels);
+        } else {
+            barrier_levels(cmd, block->images[i], 0, full_levels,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        }
     }
 
     vkEndCommandBuffer(cmd);
@@ -228,7 +305,7 @@ static VkResult create_image_views(VkDevice device, gpu_texture_source const* so
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
             .format = sources[i].format,
             .components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
-            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_level_count(sources[i].width, sources[i].height), 0, 1 },
         };
         VkResult res = vkCreateImageView(device, &info, NULL, &out->views[i]);
         if (res != VK_SUCCESS)
@@ -289,7 +366,7 @@ VkResult create_texture_sampler(VkDevice device, VkSampler* out_sampler)
         .flags = 0,
         .magFilter = VK_FILTER_LINEAR,
         .minFilter = VK_FILTER_LINEAR,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -299,7 +376,7 @@ VkResult create_texture_sampler(VkDevice device, VkSampler* out_sampler)
         .compareEnable = VK_FALSE,
         .compareOp = VK_COMPARE_OP_ALWAYS,
         .minLod = 0.0f,
-        .maxLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
         .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
         .unnormalizedCoordinates = VK_FALSE,
     };

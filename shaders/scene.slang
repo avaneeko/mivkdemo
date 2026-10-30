@@ -2,9 +2,13 @@
 struct PushConstants {
     column_major float4x4 modelView;
     column_major float4x4 proj;
+    uint baseColorTexture;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> push;
+
+[[vk::binding(0, 0)]] Texture2D<float4> Textures[];
+[[vk::binding(1, 0)]] SamplerState TextureSampler;
 
 struct VSInput {
     [[vk::location(0)]] float3 position : POSITION;
@@ -14,25 +18,18 @@ struct VSInput {
 
 struct VSOutput {
     float4 position : SV_Position;
-    float3 viewNormal : COLOR0;
+    float2 texcoord : TEXCOORD0;
 };
 
 [shader("vertex")]
 VSOutput vs_main(VSInput input) {
     VSOutput output;
-
-    // View-space normal
-    float3x3 normalMatrix = (float3x3)push.modelView;
-    output.viewNormal = normalize(mul(normalMatrix, input.normal));
-
-    // Clip-space
     output.position = mul(push.proj, mul(push.modelView, float4(input.position, 1.0)));
-
+    output.texcoord = input.texcoord;
     return output;
 }
 
 [shader("fragment")]
 float4 fs_main(VSOutput input) : SV_Target {
-    // Normal visualization: map normal from [-1,1] to [0,1]
-    return float4(input.viewNormal * 0.5 + 0.5, 1.0);
+    return Textures[push.baseColorTexture].Sample(TextureSampler, input.texcoord);
 }

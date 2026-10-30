@@ -113,6 +113,9 @@ int main(int argc, const char** argv)
         Loader.UploadTextureData(vk.device, vk.physical_device, vk.command_pools[0], vk.queue);
     check(LoaderTextureResult == VK_SUCCESS);
 
+    VkResult SceneTextureWriteResult = WriteSceneTextures(vk.device, ScenePipeline, Loader.GetTextures(), Loader.GetTextureSampler());
+    check(SceneTextureWriteResult == VK_SUCCESS);
+
     // testing
     float const data[] =
     {
@@ -268,8 +271,10 @@ int main(int argc, const char** argv)
 
         // Draw scene
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ScenePipeline.Pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ScenePipeline.Layout, 0, 1, &ScenePipeline.TextureSet, 0, nullptr);
 
         auto const& meshes = Loader.GetMeshes();
+        auto const& materials = Loader.GetMaterials();
 
         for (auto const& Scene : Scenes) {
             for (auto const& Inst : Scene.Instances) {
@@ -278,11 +283,12 @@ int main(int argc, const char** argv)
                 FMat4 model = FMat4::FromFloat16(Inst.WorldMatrix);
                 FMat4 modelView = view * model;
 
-                // Push constants: { modelView, proj } = 128 bytes
-                struct { FMat4 modelView; FMat4 proj; } pushData;
+                // Push constants: { modelView, proj, baseColorTexture } = 132 bytes
+                struct { FMat4 modelView; FMat4 proj; uint32_t baseColorTexture; } pushData;
                 pushData.modelView = modelView;
                 pushData.proj = proj;
-                vkCmdPushConstants(cmd, ScenePipeline.Layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushData), &pushData);
+                pushData.baseColorTexture = materials[mesh.MaterialId].BaseColorTexture;
+                vkCmdPushConstants(cmd, ScenePipeline.Layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushData), &pushData);
 
                 VkDeviceSize vbOffset = mesh.VertexBufferOffset;
                 vkCmdBindVertexBuffers(cmd, 0, 1, &mesh.VertexBuffer, &vbOffset);
@@ -362,6 +368,8 @@ int main(int argc, const char** argv)
         // Sleep(1);
     }
 
+    vkDeviceWaitIdle(vk.device);
+    Loader.DestroyGpuData(vk.device);
     DestroyScenePipeline(vk.device, ScenePipeline);
 
     return 0;

@@ -7,11 +7,14 @@ extern "C" {
 
 #include "vulkan/vulkan.h"
 
+// pixels holds mip_levels tightly packed levels, largest first. Uncompressed sources with fewer
+// levels than the full chain get the rest generated on upload.
 typedef struct {
     void const* pixels;
     uint32_t width;
     uint32_t height;
     VkFormat format;
+    uint32_t mip_levels;
 } gpu_texture_source;
 
 // Every image in a block shares one VkDeviceMemory; each image is bound at its own offset.

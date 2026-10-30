@@ -39,16 +39,16 @@ class SceneLoader
     std::vector<CStagingMaterial> StagingMaterials;
     std::vector<CDecodedTexture> StagingTextures; // Decoded on CPU; uploaded by UploadTextureData.
 
-    VkBuffer MeshBuffer;              // Buffer backing all meshes of the scene.
-    VkDeviceMemory MeshMemory;        // It's memory.
+    VkBuffer MeshBuffer = VK_NULL_HANDLE;              // Buffer backing all meshes of the scene.
+    VkDeviceMemory MeshMemory = VK_NULL_HANDLE;        // It's memory.
     
-    VkBuffer IndexBuffer;             // Buffer backing all mesh index data.
-    VkDeviceMemory IndexMemory;       // It's memory.
+    VkBuffer IndexBuffer = VK_NULL_HANDLE;             // Buffer backing all mesh index data.
+    VkDeviceMemory IndexMemory = VK_NULL_HANDLE;       // It's memory.
 
     std::vector<FMesh> Meshes;        // GPU-ready mesh descriptors, filled by UploadMeshData.
 
-    gpu_texture_block Textures;       // All scene textures, in one device memory block.
-    VkSampler TextureSampler;
+    gpu_texture_block Textures{};     // All scene textures, in one device memory block.
+    VkSampler TextureSampler = VK_NULL_HANDLE;
 
     // Estimates VkBuffer size for the entire all the scene's meshes.
     VkDeviceSize EstimateSceneMeshMemory(cgltf_data const* gltf);
@@ -58,8 +58,10 @@ public:
 
     VkResult UploadMeshData(VkDevice device, VkPhysicalDevice physical, VkCommandPool cmd_pool, VkQueue queue);
     VkResult UploadTextureData(VkDevice device, VkPhysicalDevice physical, VkCommandPool cmd_pool, VkQueue queue);
+    void DestroyGpuData(VkDevice device);
 
     std::vector<FMesh> const& GetMeshes() const { return Meshes; }
+    std::vector<CStagingMaterial> const& GetMaterials() const { return StagingMaterials; }
     gpu_texture_block const& GetTextures() const { return Textures; }
     VkSampler GetTextureSampler() const { return TextureSampler; }
 };

@@ -511,13 +511,35 @@ VkResult SceneLoader::UploadMeshData(VkDevice Device, VkPhysicalDevice Physical,
     return VK_SUCCESS;
 }
 
+void SceneLoader::DestroyGpuData(VkDevice Device)
+{
+    if (TextureSampler != VK_NULL_HANDLE)
+        vkDestroySampler(Device, TextureSampler, nullptr);
+    TextureSampler = VK_NULL_HANDLE;
+    destroy_texture_block(Device, &Textures);
+
+    if (IndexBuffer != VK_NULL_HANDLE)
+        vkDestroyBuffer(Device, IndexBuffer, nullptr);
+    if (IndexMemory != VK_NULL_HANDLE)
+        vkFreeMemory(Device, IndexMemory, nullptr);
+    IndexBuffer = VK_NULL_HANDLE;
+    IndexMemory = VK_NULL_HANDLE;
+
+    if (MeshBuffer != VK_NULL_HANDLE)
+        vkDestroyBuffer(Device, MeshBuffer, nullptr);
+    if (MeshMemory != VK_NULL_HANDLE)
+        vkFreeMemory(Device, MeshMemory, nullptr);
+    MeshBuffer = VK_NULL_HANDLE;
+    MeshMemory = VK_NULL_HANDLE;
+}
+
 VkResult SceneLoader::UploadTextureData(VkDevice Device, VkPhysicalDevice Physical,
     VkCommandPool CmdPool, VkQueue Queue)
 {
     std::vector<gpu_texture_source> Sources;
     Sources.reserve(StagingTextures.size());
     for (auto const& Texture : StagingTextures)
-        Sources.push_back(gpu_texture_source{ Texture.Pixels.data(), Texture.Width, Texture.Height, Texture.Format });
+        Sources.push_back(gpu_texture_source{ Texture.Pixels.data(), Texture.Width, Texture.Height, Texture.Format, Texture.MipLevels });
 
     VkResult Result = create_texture_block(Device, Physical, CmdPool, Queue,
         Sources.data(), (uint32_t)Sources.size(), &Textures);

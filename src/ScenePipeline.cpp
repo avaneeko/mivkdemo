@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 #define SCENE_VS_PATH "c:/stuff/mivkdemo/shaders/scene.vs.spv"
 #define SCENE_PS_PATH "c:/stuff/mivkdemo/shaders/scene.ps.spv"
@@ -125,21 +126,102 @@ VkResult CreateScenePipeline(VkDevice device, VkFormat colorFormat, VkFormat dep
         .pDynamicStates = dynamicStates,
     };
 
-    // Push constant range: { model, viewProj } = 128 bytes
+    // Push constants: { modelView, proj, baseColorTexture } = 132 bytes
     VkPushConstantRange pushRange = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = sizeof(float) * 32, // 16 floats model + 16 floats viewProj
+        .size = sizeof(float) * 32 + sizeof(uint32_t),
     };
+
+    VkDescriptorSetLayoutBinding bindings[] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .descriptorCount = SCENE_MAX_TEXTURES,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+    };
+
+    VkDescriptorBindingFlags bindingFlags[] = {
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
+        0,
+    };
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+        .bindingCount = ARRAYSIZE(bindingFlags),
+        .pBindingFlags = bindingFlags,
+    };
+
+    VkDescriptorSetLayoutCreateInfo setLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = &bindingFlagsInfo,
+        .bindingCount = ARRAYSIZE(bindings),
+        .pBindings = bindings,
+    };
+
+    VkResult res = vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &OutPipeline->TextureSetLayout);
+    if (res != VK_SUCCESS) {
+        vkDestroyShaderModule(device, vs, nullptr);
+        vkDestroyShaderModule(device, ps, nullptr);
+        return res;
+    }
 
     VkPipelineLayoutCreateInfo layoutInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &OutPipeline->TextureSetLayout,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushRange,
     };
 
-    VkResult res = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &OutPipeline->Layout);
+    res = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &OutPipeline->Layout);
     if (res != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(device, OutPipeline->TextureSetLayout, nullptr);
+        vkDestroyShaderModule(device, vs, nullptr);
+        vkDestroyShaderModule(device, ps, nullptr);
+        return res;
+    }
+
+    VkDescriptorPoolSize poolSizes[] = {
+        { .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = SCENE_MAX_TEXTURES },
+        { .type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1 },
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1,
+        .poolSizeCount = ARRAYSIZE(poolSizes),
+        .pPoolSizes = poolSizes,
+    };
+
+    res = vkCreateDescriptorPool(device, &poolInfo, nullptr, &OutPipeline->TexturePool);
+    if (res != VK_SUCCESS) {
+        vkDestroyPipelineLayout(device, OutPipeline->Layout, nullptr);
+        vkDestroyDescriptorSetLayout(device, OutPipeline->TextureSetLayout, nullptr);
+        vkDestroyShaderModule(device, vs, nullptr);
+        vkDestroyShaderModule(device, ps, nullptr);
+        return res;
+    }
+
+    VkDescriptorSetAllocateInfo setAlloc = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = OutPipeline->TexturePool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &OutPipeline->TextureSetLayout,
+    };
+
+    res = vkAllocateDescriptorSets(device, &setAlloc, &OutPipeline->TextureSet);
+    if (res != VK_SUCCESS) {
+        vkDestroyDescriptorPool(device, OutPipeline->TexturePool, nullptr);
+        vkDestroyPipelineLayout(device, OutPipeline->Layout, nullptr);
+        vkDestroyDescriptorSetLayout(device, OutPipeline->TextureSetLayout, nullptr);
         vkDestroyShaderModule(device, vs, nullptr);
         vkDestroyShaderModule(device, ps, nullptr);
         return res;
@@ -177,10 +259,50 @@ VkResult CreateScenePipeline(VkDevice device, VkFormat colorFormat, VkFormat dep
     return res;
 }
 
+VkResult WriteSceneTextures(VkDevice device, FScenePipeline const& Pipeline, gpu_texture_block const& Textures, VkSampler Sampler)
+{
+    if (Textures.count > SCENE_MAX_TEXTURES) {
+        fprintf(stderr, "Scene has %u textures, more than the %d descriptor slots.\r\n", Textures.count, SCENE_MAX_TEXTURES);
+        return VK_ERROR_TOO_MANY_OBJECTS;
+    }
+
+    std::vector<VkDescriptorImageInfo> ImageInfos(Textures.count);
+    for (uint32_t i = 0; i < Textures.count; ++i)
+        ImageInfos[i] = { VK_NULL_HANDLE, Textures.views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+    VkDescriptorImageInfo SamplerInfo = { Sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+
+    VkWriteDescriptorSet Writes[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = Pipeline.TextureSet,
+            .dstBinding = 0,
+            .descriptorCount = Textures.count,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .pImageInfo = ImageInfos.data(),
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = Pipeline.TextureSet,
+            .dstBinding = 1,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+            .pImageInfo = &SamplerInfo,
+        },
+    };
+
+    vkUpdateDescriptorSets(device, ARRAYSIZE(Writes), Writes, 0, nullptr);
+    return VK_SUCCESS;
+}
+
 void DestroyScenePipeline(VkDevice device, FScenePipeline Pipeline)
 {
     if (Pipeline.Pipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(device, Pipeline.Pipeline, nullptr);
     if (Pipeline.Layout != VK_NULL_HANDLE)
         vkDestroyPipelineLayout(device, Pipeline.Layout, nullptr);
+    if (Pipeline.TexturePool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(device, Pipeline.TexturePool, nullptr);
+    if (Pipeline.TextureSetLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(device, Pipeline.TextureSetLayout, nullptr);
 }

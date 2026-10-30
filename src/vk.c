@@ -77,7 +77,7 @@ static VkResult choose_physical_device(VkInstance instance, VkPhysicalDevice* de
         vkGetPhysicalDeviceProperties(dev, &properties);
         vkGetPhysicalDeviceFeatures(dev, &features);
 
-        if(properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        if(properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && features.textureCompressionBC) {
             /* TODO: Check for swapchain support? */
             /* TODO: Check swapchain present modes? (Has to have at least one.) */
 
@@ -126,11 +126,17 @@ VkResult create_logical_device(VkPhysicalDevice physical_device, uint32_t queue_
     features12.pNext = &features13,
     features12.bufferDeviceAddress = true;
 	features12.descriptorIndexing = true;
+	features12.runtimeDescriptorArray = true;
+	features12.descriptorBindingPartiallyBound = true;
 
 	VkPhysicalDeviceVulkan11Features features11 = {0};
 	features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
 	features11.shaderDrawParameters = true;
 	features11.pNext = &features12;
+
+    VkPhysicalDeviceFeatures features10 = {0};
+    features10.textureCompressionBC = VK_TRUE;
+    features10.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
 
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -140,7 +146,7 @@ VkResult create_logical_device(VkPhysicalDevice physical_device, uint32_t queue_
         .pQueueCreateInfos = &queue_info,
         .enabledExtensionCount = ARRAYSIZE(enabled_extension_names),
         .ppEnabledExtensionNames = enabled_extension_names,
-        .pEnabledFeatures = 0,
+        .pEnabledFeatures = &features10,
     };
 
     VkDevice device;

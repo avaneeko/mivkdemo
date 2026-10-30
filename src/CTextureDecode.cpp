@@ -1,5 +1,6 @@
 #include "CTextureDecode.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -14,6 +15,7 @@ namespace
     constexpr size_t DdsDx10HeaderSize = 20;
 
     constexpr uint32_t DdsFourCCDx10 = 0x30315844; // "DX10"
+    constexpr uint32_t DdsFlagMipMapCount = 0x20000;
 
     // DXGI_FORMAT values from the DX10 extended header.
     constexpr uint32_t DxgiFormatBc1Unorm = 71;
@@ -32,14 +34,21 @@ namespace
         return Size >= 4 && ReadLE<uint32_t>(Data, 0) == DdsMagic;
     }
 
-    // Only the first mip level is uploaded for now.
+    size_t Bc1LevelSize(uint32_t Width, uint32_t Height)
+    {
+        return static_cast<size_t>((Width + 3) / 4) * ((Height + 3) / 4) * 8; // 8 bytes per BC1 block.
+    }
+
     bool DecodeDdsBc1(std::byte const* Data, size_t Size, CDecodedTexture& Out)
     {
         if (Size < DdsHeaderSize)
             return false;
 
+        uint32_t const Flags = ReadLE<uint32_t>(Data, 8);
         uint32_t const Height = ReadLE<uint32_t>(Data, 12);
         uint32_t const Width = ReadLE<uint32_t>(Data, 16);
+        uint32_t const StoredMipCount = ReadLE<uint32_t>(Data, 28);
+        uint32_t const MipCount = (Flags & DdsFlagMipMapCount) && StoredMipCount > 0 ? StoredMipCount : 1;
         uint32_t const PixelFormatFourCC = ReadLE<uint32_t>(Data, 84);
 
         // Legacy DXT1 FourCC is intentionally not handled yet; only DX10 BC1 is accepted.
@@ -56,17 +65,18 @@ namespace
             return false;
 
         size_t const DataOffset = DdsHeaderSize + DdsDx10HeaderSize;
-        uint32_t const BlocksX = (Width + 3) / 4;
-        uint32_t const BlocksY = (Height + 3) / 4;
-        size_t const MipSize = static_cast<size_t>(BlocksX) * BlocksY * 8; // 8 bytes per BC1 block.
+        size_t TotalSize = 0;
+        for (uint32_t Level = 0; Level < MipCount; ++Level)
+            TotalSize += Bc1LevelSize(std::max(Width >> Level, 1u), std::max(Height >> Level, 1u));
 
-        if (Size < DataOffset + MipSize)
+        if (Size < DataOffset + TotalSize)
             return false;
 
         Out.Width = Width;
         Out.Height = Height;
+        Out.MipLevels = MipCount;
         Out.Format = Format;
-        Out.Pixels.assign(Data + DataOffset, Data + DataOffset + MipSize);
+        Out.Pixels.assign(Data + DataOffset, Data + DataOffset + TotalSize);
         return true;
     }
 }
@@ -86,6 +96,7 @@ bool DecodeTextureBytes(std::byte const* Data, size_t Size, bool bSRGB, CDecoded
 
     Out.Width = static_cast<uint32_t>(Width);
     Out.Height = static_cast<uint32_t>(Height);
+    Out.MipLevels = 1;
     Out.Format = bSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     size_t const ByteCount = static_cast<size_t>(Width) * Height * 4;
     Out.Pixels.assign(reinterpret_cast<std::byte const*>(Pixels),
